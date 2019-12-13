@@ -1,29 +1,94 @@
-const createNsfPlayer = (audioContext) => {
+const createNsfPlayer = (audioContext, message) => {
   // Messages are disabled. Feel free to handle them however you like.
-  const message = () => null;
+  if (typeof audioContext == 'function') {
+    message = audioContext;
+    audioContext = null;
+  }
+  if (typeof message != 'function') message = () => null;
 
-  const play = (fileName, trackNo) => {
+  let songData = null;
+  let fileName = null;
+
+  let ref;
+  let emu;
+  let node;
+
+
+  const load = (_fileName) => {
+    fileName = _fileName;
+
     if (node) {
       node.disconnect();
       node = null;
     }
 
-    const xhr = new XMLHttpRequest();
-    xhr.open('GET', fileName, true);
-    xhr.responseType = 'arraybuffer';
-    xhr.onerror = (e) => {
-      message(e);
-    };
-    xhr.onload = function(e) {
-      if (this.status === 404){
-        message('not found');
-        return;
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('GET', fileName, true);
+      xhr.responseType = 'arraybuffer';
+      xhr.onerror = (e) => {
+        message(e);
+      };
+      xhr.onload = function(e) {
+        if (this.status === 404){
+          message('not found');
+          reject('not found');
+          return;
+        }
+
+        initBuffer(this.response);
+
+        resolve();
+        };
+      xhr.send();
+    });
+  }
+
+  // initializes songData, ref, emu, context for playback and track info retrieval
+  const initBuffer = (data) => {
+    songData = new Uint8Array(data);
+
+    ref = Module.allocate(1, 'i32', Module.ALLOC_STATIC);
+
+    if (!window.AudioContext) {
+      if (window.webkitAudioContext) {
+        window.AudioContext = window.webkitAudioContext;
+      } else if (window.mozAudioContext) {
+        window.AudioContext = window.mozAudioContext;
+      } else {
+        message('Web Audio API is not supported.');
       }
-      const payload = new Uint8Array(this.response);
-      playMusicData(payload, trackNo);
-      updateSongInfo(fileName, trackNo);
-    };
-    xhr.send();
+    }
+
+    try {
+      ctx = audioContext || new AudioContext();
+    } catch(err) {
+      console.error(`Unable to create AudioContext. Error: ${err}`);
+      return;
+    }
+
+    const samplerate = ctx.sampleRate;
+
+    if (Module.ccall('gme_open_data', 'number', ['array', 'number', 'number', 'number'], [songData, songData.length, ref, samplerate]) != 0) {
+      console.error('gme_open_data failed.');
+      return;
+    }
+
+    emu = Module.getValue(ref, 'i32');
+  }
+
+  const play = (trackNo) => {
+    if (songData == null) {
+      throw new Error('no file has been loaded');
+    }
+
+    if (node) {
+      node.disconnect();
+      node = null;
+    }
+
+    playTrack(trackNo);
+    // updateSongInfo(fileName, trackNo);
   };
 
   const stop = () => {
@@ -32,14 +97,38 @@ const createNsfPlayer = (audioContext) => {
     }
 
     node.disconnect();
-    if (Module.ccall('gme_delete', 'number', ['number'], [emu]) != 0) {
-      console.error('Failed to stop track.');
-    }
+    // if (Module.ccall('gme_delete', 'number', ['number'], [emu]) != 0) {
+    //   console.error('Failed to stop track.');
+    // }
   };
 
-  let ref;
-  let emu;
-  let node;
+  const getTrackCount = () => {
+    if (songData == null) {
+      throw new Error('no file has been loaded');
+    }
+
+  // const updateSongInfo = (filename, subtune) => {
+    return Module.ccall('gme_track_count', 'number', ['number'], [emu]);
+  };
+
+  const getTrackInfo = (track) => {
+    if (songData == null) {
+      throw new Error('no file has been loaded');
+    }
+
+  // const updateSongInfo = (filename, subtune) => {
+    // const subtune_count = Module.ccall('gme_track_count', 'number', ['number'], [emu]);
+
+    if (Module.ccall('gme_track_info', 'number', ['number', 'number', 'number'], [emu, ref, track]) != 0) {
+      console.error('Could not load metadata.');
+    }
+
+    return parseMetadata(Module.getValue(ref, '*'));
+  };
+
+  const unload = () => {
+    Module.ccall('gme_delete', 'number', ['number'], [emu]);
+  }
 
   const parseMetadata = ref => {
     let offset = 0;
@@ -75,57 +164,12 @@ const createNsfPlayer = (audioContext) => {
      return res;
   };
 
-  const updateSongInfo = (filename, subtune) => {
-   const subtune_count = Module.ccall('gme_track_count', 'number', ['number'], [emu]);
-
-   if (Module.ccall('gme_track_info', 'number', ['number', 'number', 'number'], [emu, ref, subtune]) != 0) {
-     console.error('Could not load metadata.');
-   }
-
-    const metadata = parseMetadata(Module.getValue(ref, '*'));
-
-    message('playing', filename, metadata);
-  };
-
-  const playMusicData = (payload, subtune) => {
-    if (!window.AudioContext) {
-      if (window.webkitAudioContext) {
-        window.AudioContext = window.webkitAudioContext;
-      } else if (window.mozAudioContext) {
-        window.AudioContext = window.mozAudioContext;
-      } else {
-        message('Web Audio API is not supported.');
-      }
-    }
-
-    try{
-      ctx = audioContext || new AudioContext();
-    } catch(err) {
-      console.error(`Unable to create AudioContext. Error: ${err}`);
-      return;
-    }
-
-    ref = Module.allocate(1, 'i32', Module.ALLOC_STATIC);
-
-    const samplerate = ctx.sampleRate;
-
-    if (Module.ccall('gme_open_data', 'number', ['array', 'number', 'number', 'number'], [payload, payload.length, ref, samplerate]) != 0) {
-      console.error('gme_open_data failed.');
-      return;
-    }
-
-    emu = Module.getValue(ref, 'i32');
-
-    const subtune_count = Module.ccall('gme_track_count', 'number', ['number'], [emu]);
-
+  const playTrack = (subtune) => {
     Module.ccall('gme_ignore_silence', 'number', ['number'], [emu, 1]);
-
-    const voice_count = Module.ccall('gme_voice_count', 'number', ['number'], [emu]);
-    message('Channel count: ', voice_count);
-    message('Track count: ', subtune_count);
 
     if (Module.ccall('gme_start_track', 'number', ['number', 'number'], [emu, subtune]) != 0) {
       console.error('Failed to load track.');
+      return;
     }
 
     const bufferSize = 1024 * 16;
@@ -162,8 +206,7 @@ const createNsfPlayer = (audioContext) => {
 
     node.connect(ctx.destination);
 
-    window.savedReferences = [ctx, node];
   };
 
-  return { play, stop };
+  return { load, play, stop, getTrackCount, getTrackInfo, unload };
 };
